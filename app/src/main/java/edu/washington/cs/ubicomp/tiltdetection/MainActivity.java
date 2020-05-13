@@ -10,7 +10,10 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.media.MediaScannerConnection;
+import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
@@ -22,15 +25,26 @@ import com.jjoe64.graphview.series.DataPoint;
 import com.jjoe64.graphview.series.LineGraphSeries;
 
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.Writer;
 import java.lang.reflect.Array;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.Timer;
 import java.util.TimerTask;
 
 public class MainActivity extends AppCompatActivity implements SensorEventListener {
 
     private static final String TAG = "TiltDetection";
+    private static final double SAMPLE_INTERVAL = 0.02;
+    private static final double GRAVITY = 9.81;
+
     Button startButton;
     TextView tiltText;
     GraphView accelGraph;
@@ -40,6 +54,15 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private Sensor accelerometer;
     private Sensor gyroscope_raw;
     private Sensor accelerometer_raw;
+
+    private double curr_pitch;
+    private double curr_roll;
+    private double curr_pitch_acc;
+    private double curr_roll_acc;
+    private double curr_pitch_gyro;
+    private double curr_roll_gyro;
+
+    private double alpha = 0.05;
 
     private ArrayList<float[]> acc_data_raw;
     private ArrayList<float[]> gyro_data_raw;
@@ -53,6 +76,16 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private ArrayList<LineGraphSeries<DataPoint>> gryo_display_calibrated = new ArrayList<>();
     private ArrayList<ArrayList<DataPoint>> gryo_result_raw = new ArrayList<>();
     private ArrayList<ArrayList<DataPoint>> gryo_result_calibrated = new ArrayList<>();
+
+    private double[] gyro_bias = {0.0, 0.0, 0.0};
+    private double[] accel_bias = {0.0, 0.0, 0.0};
+
+    private ArrayList<Double> pitch_results;
+    private ArrayList<Double> roll_results;
+    private ArrayList<Double> pitch_results_acc;
+    private ArrayList<Double> roll_results_acc;
+    private ArrayList<Double> pitch_results_gyro;
+    private ArrayList<Double> roll_results_gyro;
 
     private int graphColor[] = {Color.argb(255,255,180,9), // orange
             Color.argb(255,46, 168, 255), // blue
@@ -69,6 +102,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private Paint dottedLine;
     private int MOTION_PREVIEW_SIZE = 20000;
     private boolean recording = false;
+    private boolean calibrated = false;
     private MainActivity thisActivity = this;
 
     @Override
@@ -90,7 +124,17 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                     sensorManager.unregisterListener(thisActivity);
                     startButton.setText("Start");
                     recording = false;
+                    calibrated = false;
+
+                    writeResults();
                 } else {
+                    pitch_results = new ArrayList<>();
+                    roll_results = new ArrayList<>();
+                    pitch_results_acc = new ArrayList<>();
+                    roll_results_acc = new ArrayList<>();
+                    pitch_results_gyro = new ArrayList<>();
+                    roll_results_gyro = new ArrayList<>();
+
                     acc_data_raw = new ArrayList<>();
                     gyro_data_raw = new ArrayList<>();
 
@@ -123,7 +167,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                         accelGraph.addSeries(acc_display_raw.get(i));
                         //accelGraph.addSeries(acc_display_calibrated.get(i));
 
-                        break;
                     }
 
                     gyroGraph.removeAllSeries();
@@ -149,7 +192,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                         gyroGraph.addSeries(gryo_display_raw.get(i));
                         //gyroGraph.addSeries(gryo_display_calibrated.get(i));
 
-                        break;
                     }
 
                     sensorManager.registerListener(thisActivity, accelerometer, SensorManager.SENSOR_DELAY_GAME);
@@ -172,9 +214,11 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                             runOnUiThread(new Runnable() {
                                 @Override
                                 public void run() {
-                                    tiltText.setText("0.0");
+                                    tiltText.setText("0.00°, 0.00°");
                                 }
                             });
+
+                            calibrated = true;
                         }
                     }, 10*1000);
                 }
@@ -198,6 +242,91 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     }
 
+    private void writeResults() {
+        JSONObject object = new JSONObject();
+        JSONArray acc_pitch = new JSONArray();
+        JSONArray acc_roll = new JSONArray();
+        JSONArray gyro_pitch = new JSONArray();
+        JSONArray gyro_roll = new JSONArray();
+        JSONArray pitch = new JSONArray();
+        JSONArray roll = new JSONArray();
+
+        try {
+            for (Double d : pitch_results) {
+                pitch.put(d.doubleValue());
+            }
+
+            object.put("pitch", pitch);
+
+            for (Double d : roll_results) {
+                roll.put(d.doubleValue());
+            }
+
+            object.put("roll", roll);
+
+            for (Double d : pitch_results_acc) {
+                acc_pitch.put(d.doubleValue());
+            }
+
+            object.put("pitch_acc", acc_pitch);
+
+            for (Double d : roll_results_acc) {
+                acc_roll.put(d.doubleValue());
+            }
+
+            object.put("roll_acc", acc_roll);
+
+            for (Double d : pitch_results_gyro) {
+                gyro_pitch.put(d.doubleValue());
+            }
+
+            object.put("pitch_gyro", gyro_pitch);
+
+            for (Double d : roll_results_gyro) {
+                gyro_roll.put(d.doubleValue());
+            }
+
+            object.put("roll_gyro", gyro_roll);
+
+            try {
+                SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd-HH:mm:ssZ");
+
+                File dir = new File(Environment.getExternalStorageDirectory(), "tilt");
+
+                if (!dir.exists()) {
+                    boolean r = dir.mkdir();
+                    Log.d(TAG, r? "True":"False");
+                }
+
+                File file = new File(Environment.getExternalStorageDirectory(),
+                        "tilt/" + simpleDateFormat.format(new Date()) + ".json");
+                Writer output = new BufferedWriter(new FileWriter(file));
+                output.write(object.toString());
+                output.close();
+                MediaScannerConnection.scanFile(this, new String[]{file.getPath()},
+                        /*mimeTypes*/null, new MediaScannerConnection.MediaScannerConnectionClient() {
+                            @Override
+                            public void onMediaScannerConnected() {
+                                // Do nothing
+                            }
+
+                            @Override
+                            public void onScanCompleted(String path, Uri uri) {
+                                Log.i(TAG, "Scanned " + path + ":");
+                                Log.i(TAG, "-> uri=" + uri);
+                            }
+                        });
+            } catch (Exception e) {
+                Log.d(TAG, "EXCEPTION!!!");
+                Log.d(TAG, e.getLocalizedMessage());
+                Log.d(TAG, e.getStackTrace().toString());
+            }
+
+        } catch (Exception e) {
+
+        }
+    }
+
     @Override
     public void onSensorChanged(SensorEvent sensorEvent) {
         if (sensorEvent.sensor.getType() == Sensor.TYPE_ACCELEROMETER_UNCALIBRATED) {
@@ -208,9 +337,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 }
                 DataPoint dataPoint = new DataPoint(acc_display_raw.size() > 0 ? acc_display_raw.get(i).getHighestValueX()+1: 1, sensorEvent.values[i]);
                 acc_display_raw.get(i).appendData(dataPoint, true, MOTION_PREVIEW_SIZE);
-                break;
             }
-            calculateAngleFromAccel();
+
+            if (calibrated)
+                calculateAngleFromAccel();
 
         } else if (sensorEvent.sensor.getType() == Sensor.TYPE_LINEAR_ACCELERATION
                 || sensorEvent.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
@@ -220,7 +350,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 }
                 DataPoint dataPoint = new DataPoint(acc_display_calibrated.size() > 0 ? acc_display_calibrated.get(i).getHighestValueX()+1: 1, sensorEvent.values[i]);
                 acc_display_calibrated.get(i).appendData(dataPoint, true, MOTION_PREVIEW_SIZE);
-                break;
             }
         } else if (sensorEvent.sensor.getType() == Sensor.TYPE_GYROSCOPE) {
             for (int i = 0; i < 3; i++) {
@@ -229,7 +358,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 }
                 DataPoint dataPoint = new DataPoint(gryo_display_calibrated.size() > 0? gryo_display_calibrated.get(i).getHighestValueX()+1: 1, sensorEvent.values[i]);
                 gryo_display_calibrated.get(i).appendData(dataPoint, true, MOTION_PREVIEW_SIZE);
-                break;
             }
         } else if (sensorEvent.sensor.getType() == Sensor.TYPE_GYROSCOPE_UNCALIBRATED) {
             gyro_data_raw.add(sensorEvent.values);
@@ -239,47 +367,47 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 }
                 DataPoint dataPoint = new DataPoint(gryo_display_raw.size() > 0 ? gryo_display_raw.get(i).getHighestValueX()+1:1, sensorEvent.values[i]);
                 gryo_display_raw.get(i).appendData(dataPoint, true, MOTION_PREVIEW_SIZE);
-                break;
             }
-            calculateAngleFromGyro();
+
+            if (calibrated)
+                calculateAngleFromGyro();
         }
     }
 
     private void calculateAngleFromAccel() {
         float[] last_acc_data = acc_data_raw.get(acc_data_raw.size() - 1);
-        double roll = Math.atan2(last_acc_data[1], last_acc_data[2]);// * 180/Math.PI;
-        double pitch = Math.atan2(-1*last_acc_data[0], Math.sqrt(last_acc_data[1]*last_acc_data[1]+last_acc_data[2]*last_acc_data[2]));// * 180/Math.PI;
+        curr_pitch_acc = Math.atan2(last_acc_data[1]-accel_bias[1], last_acc_data[2]);// * 180/Math.PI;
+        curr_roll_acc = Math.atan2(last_acc_data[0]-accel_bias[0], last_acc_data[2]);// * 180/Math.PI;
+        //curr_pitch_acc = Math.atan2(-1*(last_acc_data[0]-accel_bias[0]),
+        //        Math.sqrt((last_acc_data[1]-accel_bias[1])*(last_acc_data[1]-accel_bias[1])+(last_acc_data[2])*(last_acc_data[2])));// * 180/Math.PI;
 
-        Log.d(TAG, String.format("Angle from accel %.5f, %.5f", pitch, roll));
+        //Log.d(TAG, String.format("Angle from accel %.5f, %.5f", curr_pitch_acc, curr_roll_acc));
+
+        pitch_results_acc.add(curr_pitch_acc);
+        roll_results_acc.add(curr_roll_acc);
     }
     private void calculateAngleFromGyro() {
-        double pitch = getIntegral(gyro_data_raw, 0, 0.02);
-        double roll = getIntegral(gyro_data_raw, 1,0.02);
+        float[] last_gyro_data = gyro_data_raw.get(gyro_data_raw.size()-1);
+        curr_pitch = (1-alpha)*(curr_pitch + (last_gyro_data[0]-gyro_bias[0])*SAMPLE_INTERVAL) + alpha*curr_pitch_acc;
+        curr_roll = (1-alpha)*(curr_roll + (last_gyro_data[1]-gyro_bias[1])*SAMPLE_INTERVAL) + alpha*curr_roll_acc;
 
-        Log.d(TAG, String.format("Angle from gyro %.5f, %.5f", pitch, roll));
-    }
+        curr_pitch_gyro = curr_pitch_gyro + (last_gyro_data[0]-gyro_bias[0])*SAMPLE_INTERVAL;
+        curr_roll_gyro = curr_roll_gyro + (last_gyro_data[1]-gyro_bias[1])*SAMPLE_INTERVAL;
 
-    private double getIntegral(ArrayList<float[]> ar, int index, double xDist) {
-        double base = 0;
-        double prev = 0;
-        double triHeight = 0;
-        double rectHeight = 0;
-        double tri = 0;
-        double rect = 0;
-        double integral = 0;
-        for (int i = 0; i < ar.size(); i++) {
-            triHeight=Math.abs(ar.get(i)[index]-prev); // get Height Triangle
-            tri = xDist*triHeight/2;    // get Area Triangle
-            if(ar.get(i)[index]<=prev){
-                rectHeight = Math.abs(base-ar.get(i)[index]); // get Height Rectangle
-            }else {
-                rectHeight = Math.abs(base-(ar.get(i)[index]-triHeight)); // get Height Rectangle
+        //Log.d(TAG, String.format("Angle from gyro %.5f, %.5f", last_gyro_data[0], last_gyro_data[1]));
+        //Log.d(TAG, String.format("Angle from c.f. %.5f, %.5f", curr_pitch, curr_roll));
+
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                tiltText.setText(String.format("%.2f°, %.2f°", curr_pitch * 57.2958, curr_roll * 57.2958));
             }
-            rect = xDist*rectHeight;    // get Area Rectangle
-            integral += (rect + tri); // add Whole Area to Integral
-            prev=ar.get(i)[index];
-        }
-        return integral;
+        });
+
+        pitch_results.add(curr_pitch);
+        roll_results.add(curr_roll);
+        pitch_results_gyro.add(curr_pitch_gyro);
+        roll_results_gyro.add(curr_roll_gyro);
     }
 
     @Override
@@ -311,8 +439,17 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         Log.d(TAG, String.format("acc bias: %.5f, %.5f, %.5f, system bias: %.5f, %.5f, %.5f",
                 acc_raw_x.getMean(), acc_raw_y.getMean(), acc_raw_z.getMean(),
                 acc_data_raw.get(acc_data_raw.size()-1)[3], acc_data_raw.get(acc_data_raw.size()-1)[4], acc_data_raw.get(acc_data_raw.size()-1)[5]));
+
+        accel_bias[0] = acc_raw_x.getMean();
+        accel_bias[1] = acc_raw_y.getMean();
+        accel_bias[2] = acc_raw_z.getMean() - GRAVITY;
+
         Log.d(TAG, String.format("gyro bias: %.5f, %.5f, %.5f, system bias: %.5f, %.5f, %.5f",
                 gyro_raw_x.getMean(), gyro_raw_y.getMean(), gyro_raw_y.getMean(),
                 gyro_data_raw.get(gyro_data_raw.size()-1)[3], gyro_data_raw.get(gyro_data_raw.size()-1)[4], gyro_data_raw.get(gyro_data_raw.size()-1)[5]));
+
+        gyro_bias[0] = gyro_raw_x.getMean();
+        gyro_bias[1] = gyro_raw_y.getMean();
+        gyro_bias[2] = gyro_raw_z.getMean();
     }
 }
